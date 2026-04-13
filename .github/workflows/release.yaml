@@ -1,4 +1,4 @@
-name: Build and Release SAGA
+name: Build and Release Deck Muse
 
 on:
   push:
