@@ -111,12 +111,28 @@ type ComposeMessageModalProps = {
   onSend: (text: string) => Promise<void>;
   onRequestClose: () => void;
   currentGameName?: string;
+  isWaiting: boolean;
 };
 
 // Modal input UI. This is used so typing can happen in a popup above the side panel/keyboard.
-function ComposeMessageModal({ initialText, onDraftChange, onSend, onRequestClose, currentGameName }: ComposeMessageModalProps) {
+function ComposeMessageModal({ initialText, onDraftChange, onSend, onRequestClose, currentGameName, isWaiting }: ComposeMessageModalProps) {
   // Local modal field state starts from the latest draft from the panel.
   const [text, setText] = useState(initialText);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const isSendDisabled = isWaiting || isSubmitting;
+
+  const submitMessage = async () => {
+    if (isSendDisabled) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await onSend(text);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   return (
     <ModalRoot
@@ -150,7 +166,7 @@ function ComposeMessageModal({ initialText, onDraftChange, onSend, onRequestClos
             onKeyDown={(event) => {
               // Enter sends through the same pipeline as the button.
               if (event.key === "Enter") {
-                void onSend(text);
+                void submitMessage();
               }
             }}
             bShowClearAction
@@ -158,8 +174,8 @@ function ComposeMessageModal({ initialText, onDraftChange, onSend, onRequestClos
         </PanelSectionRow>
 
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => void onSend(text)}>
-            Ask Assistant
+          <ButtonItem layout="below" disabled={isSendDisabled} onClick={() => void submitMessage()}>
+            {isWaiting ? "Waiting for response..." : "Ask Assistant"}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
@@ -246,6 +262,7 @@ function Content() {
       <ComposeMessageModal
         initialText={initialDraft}
         currentGameName={currentGameName}
+        isWaiting={isWaiting}
         onDraftChange={setDraft}
         onRequestClose={() => modal?.Close()}
         onSend={async (text) => {
@@ -255,17 +272,27 @@ function Content() {
             return;
           }
 
+          if (pendingRequests > 0) {
+            toaster.toast({
+              title: "Please wait",
+              body: "You already have a question in progress.",
+            });
+            return;
+          }
+
           // Show user input immediately in the chat window.
           appendMessage("local", trimmed);
           // Keep last message text available as the next modal default.
           setDraft(trimmed);
+
+          // Return to the plugin view immediately after submit.
+          modal?.Close();
 
           try {
             // Send to Python backend; backend emits the transformed response.
             pendingRequests += 1;
             setWaitingFromPending();
             await sendMessageToBackend(trimmed);
-            modal?.Close();
           } catch (error) {
             pendingRequests = Math.max(0, pendingRequests - 1);
             setWaitingFromPending();
@@ -362,9 +389,15 @@ function Content() {
 
         <PanelSectionRow>
           {/* Opens modal text entry so input is usable with the on-screen keyboard. */}
-          <ButtonItem layout="below" onClick={openComposeModal}>
-            Type a question
+          <ButtonItem layout="below" disabled={isWaiting} onClick={openComposeModal}>
+            {isWaiting ? "Waiting for response..." : "Type a question"}
           </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <div style={{ width: "100%", opacity: 0.7, fontSize: "11px" }}>
+            You can send one question at a time. Ask buttons are disabled until Deck Muse replies.
+          </div>
         </PanelSectionRow>
 
         <PanelSectionRow>
