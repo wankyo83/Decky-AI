@@ -13,7 +13,12 @@ logs
 results
 tmp
 
-# Coverage reports
+py_modules/*
+.tmp_wheels/
+.tmp_wheels/*
+py_modules/
+
+# Coverage report
 coverage
 
 # API keys and secrets

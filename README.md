@@ -1,99 +1,96 @@
-# Decky Plugin Template [![Chat](https://img.shields.io/badge/chat-on%20discord-7289da.svg)](https://deckbrew.xyz/discord)
+# Deck Muse
 
-Reference example for using [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) (@decky/ui) in a [decky-loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin.
+Deck Muse is a Decky plugin that gives in-game help and advice while you play.
 
-### **Please also refer to the [wiki](https://wiki.deckbrew.xyz/en/user-guide/home#plugin-development) for important information on plugin development and submissions/updates. currently documentation is split between this README and the wiki which is something we are hoping to rectify in the future.**  
+It uses a Google Gemini-compatible model (default: Gemma 4 variant) with web search grounding and returns concise answers with sources.
 
-## Developers
+*This app was developed with the help of Github Co-Pilot, particularly for the React parts as this was new to me.*
 
-### Dependencies
+## Features
 
-This template relies on the user having Node.js v16.14+ and `pnpm` (v9) installed on their system.  
-Please make sure to install pnpm v9 to prevent issues with CI during plugin submission.  
-`pnpm` can be downloaded from `npm` itself which is recommended.
+- Ask gameplay and strategy questions from the Decky Quick Access panel
+- Context-aware prompt prefills using the currently running game
+- Chat history persistence across plugin reloads
+- Source links included in model responses when available
 
-#### Linux
+## Requirements
 
-```bash
-sudo npm i -g pnpm@9
-```
+- Steam Deck with Decky Loader installed: https://decky.xyz/ (tested on v3.2.3 stable)
+- A Gemini API key: https://ai.google.dev/gemini-api/docs/api-key
+- For local development:
+   - Node.js v16.14+
+   - pnpm 9
+   - Python 3
 
-If you would like to build plugins that have their own custom backends, Docker is required as it is used by the Decky CLI tool.
+## Install from Release Zip (Steam Deck)
 
-### Making your own plugin
+1. On the Steam Deck, switch to Desktop Mode.
+2. Download the latest Deck Muse release zip.
+3. Extract the zip.
+4. Rename `.env_example` to `.env`.
+5. Edit `.env` and set `GEMINI_API_KEY`.
+6. Re-compress the plugin folder back into a zip.
+7. Return to Gaming Mode.
+8. Open Quick Access Menu (three-dot button) and open Decky.
+9. In Decky, enable Developer Mode:
+	- General -> Other -> Developer Mode
+10. Open the Developer menu, choose Install Plugin from Zip File, and select your zip.
+11. The plugin should install and then be visible in Decky
 
-1. You can fork this repo or utilize the "Use this template" button on Github.
-2. In your local fork/own plugin-repository run these commands:
-   1. ``pnpm i``
-   2. ``pnpm run build``
-   - These setup pnpm and build the frontend code for testing.
-3. Consult the [decky-frontend-lib](https://github.com/SteamDeckHomebrew/decky-frontend-lib) repository for ways to accomplish your tasks.
-   - Documentation and examples are still rough, 
-   - Decky loader primarily targets Steam Deck hardware so keep this in mind when developing your plugin.
-4. If using VSCodium/VSCode, run the `setup` and `build` and `deploy` tasks. If not using VSCodium etc. you can derive your own makefile or just manually utilize the scripts for these commands as you see fit.
+## Configuration
 
-If you use VSCode or it's derivatives (we suggest [VSCodium](https://vscodium.com/)!) just run the `setup` and `build` tasks. It's really that simple.
+Set values in `.env` or `.env_config`:
 
-#### Other important information
+- `GEMINI_API_KEY` (required)
+- `GOOGLE_MODEL` (default: `gemma-4-26b-a4b-it`)
+- `MODEL_TIMEOUT_SECONDS` (default: `60`)
+- `MODEL_TEMPERATURE` (default: `0.1`)
+- `NUM_HISTORY_MESSAGES` (default: `10`)
+- `CHAT_LOGGING_LEVEL` (default: `INFO`)
 
-Everytime you change the frontend code (`index.tsx` etc) you will need to rebuild using the commands from step 2 above or the build task if you're using vscode or a derivative.
+## Local Development
 
-Note: If you are receiving build errors due to an out of date library, you should run this command inside of your repository:
+1. Install Node.js v16.14+ and confirm it is available:
 
-```bash
-pnpm update @decky/ui --latest
-```
+	```bash
+	node --version
+	```
 
-### Backend support
+2. Install pnpm 9 (if needed):
 
-If you are developing with a backend for a plugin and would like to submit it to the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) you will need to have all backend code located in ``backend/src``, with backend being located in the root of your git repository.
-When building your plugin, the source code will be built and any finished binary or binaries will be output to ``backend/out`` (which is created during CI.)
-If your buildscript, makefile or any other build method does not place the binary files in the ``backend/out`` directory they will not be properly picked up during CI and your plugin will not have the required binaries included for distribution.
+	```bash
+	sudo npm i -g pnpm@9
+	```
 
-Example:  
-In our makefile used to demonstrate the CI process of building and distributing a plugin backend, note that the makefile explicitly creates the `out` folder (``backend/out``) and then compiles the binary into that folder. Here's the relevant snippet.
+3. Install dependencies:
 
-```make
-hello:
-	mkdir -p ./out
-	gcc -o ./out/hello ./src/main.c
-```
+	```bash
+	pnpm i
+	```
 
-The CI does create the `out` folder itself but we recommend creating it yourself if possible during your build process to ensure the build process goes smoothly.
+4. Build frontend + vendor Python dependencies:
 
-Note: When locally building your plugin it will be placed into a folder called 'out' this is different from the concept described above.
+	```bash
+	pnpm run build_all
+	```
 
-The out folder is not sent to the final plugin, but is then put into a ``bin`` folder which is found at the root of the plugin's directory.  
-More information on the bin folder can be found below in the distribution section below.
+5. Create distributable zip:
 
-### Distribution
+	```bash
+	pnpm run zip:app
+	```
 
-We recommend following the instructions found in the [decky-plugin-database](https://github.com/SteamDeckHomebrew/decky-plugin-database) on how to get your plugin up on the plugin store. This is the best way to get your plugin in front of users.
-You can also choose to do distribution via a zip file containing the needed files, if that zip file is uploaded to a URL it can then be downloaded and installed via decky-loader.
+Useful commands:
 
-Layout of a plugin zip ready for distribution:
-```
-pluginname-v1.0.0.zip (version number is optional but recommended for users sake)
-   |
-   pluginname/ <directory>
-   |  |  |
-   |  |  bin/ <directory> (optional)
-   |  |     |
-   |  |     binary (optional)
-   |  |
-   |  dist/ <directory> [required]
-   |      |
-   |      index.js [required]
-   | 
-   package.json [required]
-   plugin.json [required]
-   main.py {required if you are using the python backend of decky-loader: serverAPI}
-   README.md (optional but recommended)
-   LICENSE(.md) [required, filename should be roughly similar, suffix not needed]
-```
+- `pnpm run py:deps:vendor` to refresh vendored Python dependencies
 
-Note regarding licenses: Including a license is required for the plugin store if your chosen license requires the license to be included alongside usage of source-code/binaries!
+## Troubleshooting
 
-Standard procedure for licenses is to have your chosen license at the top of the file, and to leave the original license for the plugin-template at the bottom. If this is not the case on submission to the plugin database, you will be asked to fix this discrepancy.
+- Error about missing API key:
+  - Ensure `.env` exists and includes `GEMINI_API_KEY=...`
+- Plugin installs but does not answer:
+  - Check network access and verify model/env settings
 
-We cannot and will not distribute your plugin on the Plugin Store if it's license requires it's inclusion but you have not included a license to be re-distributed with your plugin in the root of your git repository.
+## License
+
+BSD-3-Clause. See `LICENSE`.

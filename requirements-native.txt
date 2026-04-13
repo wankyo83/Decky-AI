@@ -1,0 +1,2 @@
+pydantic-core==2.41.5
+cffi==2.0.0

@@ -1,0 +1,6 @@
+google-genai==1.71.0
+dotenv==0.9.9
+pydantic==2.12.5
+pydantic-core==2.41.5
+typing-extensions==4.15.0
+cffi==2.0.0
