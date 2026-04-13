@@ -4,7 +4,7 @@ Deck Muse is a Decky plugin that gives in-game help and advice while you play.
 
 It uses a Google Gemini-compatible model (default: Gemma 4 variant) with web search grounding and returns concise answers with sources.
 
-*This app was developed with the help of Github Co-Pilot, particularly for the React parts as this was new to me.*
+**This app was developed with the help of Github Co-Pilot, particularly for the React parts as this was new to me.**
 
 ## Features
 
