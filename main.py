@@ -78,6 +78,40 @@ class Plugin:
     async def clear_chat_history(self) -> None:
         self._write_history([])
 
+    async def has_api_key(self) -> bool:
+        import chat_common
+        return bool(chat_common.GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY"))
+
+    async def set_api_key(self, api_key: str) -> None:
+        import chat_common
+        
+        dotenv_path = Path(PLUGIN_DIR) / ".env"
+        lines = []
+        if dotenv_path.exists():
+            with open(dotenv_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        
+        new_lines = []
+        found = False
+        for line in lines:
+            if line.startswith("GEMINI_API_KEY="):
+                new_lines.append(f"GEMINI_API_KEY={api_key}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        
+        if not found:
+            # Ensure the file ends with a newline before appending
+            if new_lines and not new_lines[-1].endswith("\n"):
+                new_lines[-1] += "\n"
+            new_lines.append(f"GEMINI_API_KEY={api_key}\n")
+            
+        with open(dotenv_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+            
+        os.environ["GEMINI_API_KEY"] = api_key
+        chat_common.GEMINI_API_KEY = api_key
+
     async def send_message(self, text: str):
         # Frontend input arrives here via callable("send_message") in index.tsx.
         cleaned = text.strip()

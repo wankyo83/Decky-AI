@@ -164,13 +164,14 @@ def call_model_with_timeout(
     timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
     temperature: float = MODEL_TEMPERATURE,
     model: str = MODEL,
-    GEMINI_API_KEY: str | None = GEMINI_API_KEY,
+    api_key: str | None = None,
 ) -> Optional[str]:
     """Call the Gemini model with a timeout and raise on non-200 API status codes."""
-    if not GEMINI_API_KEY:
+    actual_key = api_key or GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
+    if not actual_key:
         raise ModelConfigError("GEMINI_API_KEY is not set in environment variables")
 
-    client = genai.Client(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=actual_key)
 
     def call_model():
 
