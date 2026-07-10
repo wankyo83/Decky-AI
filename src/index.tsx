@@ -23,6 +23,7 @@ import ReactMarkdown from "react-markdown";
 const sendMessageToBackend = callable<[text: string], void>("send_message");
 const getChatHistory = callable<[], HistoryEntry[]>("get_chat_history");
 const clearChatHistory = callable<[], void>("clear_chat_history");
+const setApiKey = callable<[api_key: string], void>("set_api_key");
 
 // Chat rows shown in the quick access panel.
 type ChatMessage = {
@@ -183,6 +184,55 @@ function ComposeMessageModal({ initialText, onDraftChange, onSend, onRequestClos
   );
 }
 
+function SettingsModal({ onRequestClose }: { onRequestClose: () => void }) {
+  const [apiKey, setApiKeyValue] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const saveKey = async () => {
+    setIsSubmitting(true);
+    try {
+      await setApiKey(apiKey);
+      toaster.toast({ title: "Success", body: "API Key updated successfully." });
+      onRequestClose();
+    } catch (e) {
+      toaster.toast({ title: "Error", body: String(e) });
+      setIsSubmitting(false);
+    }
+  };
+
+  return (
+    <ModalRoot
+      strTitle="Settings"
+      closeModal={onRequestClose}
+      onCancel={onRequestClose}
+    >
+      <PanelSection>
+        <PanelSectionRow>
+          <div style={{ opacity: 0.8, fontSize: "12px", marginBottom: "8px" }}>
+            Enter your Gemini API Key here. You can still use the .env file instead.
+          </div>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <TextField
+            label="Gemini API Key"
+            value={apiKey}
+            onChange={(e) => setApiKeyValue(e.target.value)}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={isSubmitting || !apiKey.trim()}
+            onClick={() => void saveKey()}
+          >
+            Save API Key
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+    </ModalRoot>
+  );
+}
+
 function Content() {
   // Draft is preserved between modal opens so user text is not lost.
   const [draft, setDraftState] = useState(draftCache);
@@ -288,19 +338,17 @@ function Content() {
           // Return to the plugin view immediately after submit.
           modal?.Close();
 
-          try {
-            // Send to Python backend; backend emits the transformed response.
-            pendingRequests += 1;
-            setWaitingFromPending();
-            await sendMessageToBackend(trimmed);
-          } catch (error) {
+          // Send to Python backend in the background so the modal can close immediately.
+          pendingRequests += 1;
+          setWaitingFromPending();
+          sendMessageToBackend(trimmed).catch((error) => {
             pendingRequests = Math.max(0, pendingRequests - 1);
             setWaitingFromPending();
             toaster.toast({
               title: "Send failed",
               body: String(error),
             });
-          }
+          });
         }}
       />,
       undefined,
@@ -409,6 +457,18 @@ function Content() {
             }}
           >
             Clear chat history
+          </ButtonItem>
+        </PanelSectionRow>
+
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={() => {
+              let modal: ReturnType<typeof showModal> | undefined;
+              modal = showModal(<SettingsModal onRequestClose={() => modal?.Close()} />);
+            }}
+          >
+            Settings
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
