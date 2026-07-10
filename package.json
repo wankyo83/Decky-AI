@@ -1,6 +1,6 @@
 {
   "name": "deck-muse",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "A Decky plugin that allows you to get game help using Gemma4 and google searches",
   "type": "module",
   "scripts": {
