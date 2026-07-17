@@ -37,6 +37,12 @@ AUTO_WEB_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+GAME_SEARCH_PATTERN = re.compile(
+    r"(?:게임|공략|스킬|트리|빌드|보스|퀘스트|임무|퍼즐|장비|무기|방어구|"
+    r"캐릭터|레벨|어디로|walkthrough|guide|skill|build|boss|quest|puzzle)",
+    re.IGNORECASE,
+)
+
 
 from chat_common import (
     MODEL,
@@ -1104,7 +1110,11 @@ class Plugin:
         except TimeoutError:
             response = "화면 분석 요청 시간이 초과됐습니다. 네트워크를 확인하고 다시 시도해 주세요."
         except ModelApiError as error:
-            response = f"Gemini API가 요청을 거부했습니다. 오류 코드: {error.status_code}"
+            response = (
+                "429 오류: 분당/일일 무료 사용량 소진"
+                if error.status_code == 429
+                else f"Gemini API가 요청을 거부했습니다. 오류 코드: {error.status_code}"
+            )
         except RuntimeError as error:
             response = str(error)
         except Exception as error:
@@ -1138,8 +1148,35 @@ class Plugin:
         # is authoritative; a later genuine panel close will still cancel this request.
         self._panel_session = session_id
 
-        automatic_web_search = bool(AUTO_WEB_PATTERN.search(cleaned))
-        use_web_search = question_mode == "web" or automatic_web_search
+        start_time = time.perf_counter()
+
+        # Plain Google mode deliberately bypasses Gemini, so it remains available
+        # when the Gemini API is out of quota or a model endpoint returns 404.
+        if question_mode == "google":
+            include_game = bool(game_name.strip() and GAME_SEARCH_PATTERN.search(cleaned))
+            search_query = " ".join(filter(None, [
+                game_name.strip() if include_game else "",
+                cleaned,
+            ]))
+            search_url = "https://www.google.com/search?q=" + quote_plus(search_query)
+            response = (
+                "Gemini API를 사용하지 않는 일반 Google 검색입니다.\n\n"
+                f"검색어: `{search_query}`\n\n"
+                f"[Google 검색 결과 열기]({search_url})"
+            )
+            self._append_history("user", cleaned)
+            self._append_history("assistant", response)
+            return {
+                "text": response,
+                "response_time_ms": int((time.perf_counter() - start_time) * 1000),
+            }
+
+        # New UI modes select an exact model. Legacy "general" retains automatic
+        # routing for users upgrading while an old composer modal is still mounted.
+        automatic_web_search = (
+            question_mode == "general" and bool(AUTO_WEB_PATTERN.search(cleaned))
+        )
+        use_web_search = question_mode in ("gemini25", "web") or automatic_web_search
 
         history_for_prompt = self._read_history()[-NUM_HISTORY_MESSAGES:]
         history_lines = [
@@ -1170,7 +1207,6 @@ class Plugin:
             ])
 
         prompt = "\n".join(history_lines)
-        start_time = time.perf_counter()
         request_task = asyncio.create_task(
             self._call_gemini_resilient(
                 prompt,
@@ -1208,15 +1244,18 @@ class Plugin:
             decky.logger.warning(
                 f"[chat] model API returned status {e.status_code} for input: {cleaned}"
             )
-            if e.status_code == 424:
+            if e.status_code == 429:
+                response = "429 오류: 분당/일일 무료 사용량 소진"
+            elif e.status_code == 424:
                 response = (
                     "Google 실시간 검색이 실제로 실행되지 않아 답변을 표시하지 않았습니다. "
                     "Gemini API의 Google Search 사용 권한과 무료 한도를 확인해 주세요."
                 )
             elif e.status_code == 404 and use_web_search:
                 response = (
-                    f"웹 검색 모델({SEARCH_MODEL})을 API에서 찾지 못했습니다. "
-                    "일반 모델로 전환하지 않았으며, 실시간 검색 결과로 가장하지 않았습니다."
+                    f"2.5 Flash 모델({SEARCH_MODEL})을 API에서 찾지 못했습니다(404). "
+                    "현재 API 프로젝트에서 이 모델이 제공되지 않거나 Google의 모델 접근 정책이 "
+                    "변경된 상태일 수 있습니다. 3.5 Flash 또는 Google 검색을 선택해 주세요."
                 )
             else:
                 response = f"API error code: {e.status_code}"

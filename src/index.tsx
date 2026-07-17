@@ -52,11 +52,16 @@ type HistoryEntry = {
   content: string;
 };
 
-type QuestionMode = "general" | "web";
+type QuestionMode = "gemini35" | "gemini25" | "google";
 
 const extractYouTubeVideos = (text: string) => {
   const matches = text.matchAll(/(?:youtube\.com\/watch\?(?:[^\s)]*&)?v=|youtu\.be\/)([A-Za-z0-9_-]{11})/g);
   return Array.from(new Set(Array.from(matches, (match) => match[1])));
+};
+
+const extractGoogleSearchUrls = (text: string) => {
+  const matches = text.matchAll(/https:\/\/www\.google\.com\/search\?q=[^\s)]+/g);
+  return Array.from(new Set(Array.from(matches, (match) => match[0])));
 };
 
 const openExternalUrl = (url: string) => {
@@ -161,7 +166,7 @@ const MESSAGE_LABEL_SIZE = "8px";
 
 let nextMessageId = 0;
 let draftCache = "";
-let questionModeCache: QuestionMode = "general";
+let questionModeCache: QuestionMode = "gemini35";
 let chatMessages: ChatMessage[] = [];
 let historyHydrated = false;
 let pendingRequests = 0;
@@ -314,12 +319,15 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
         <PanelSectionRow>
           <DropdownItem
             label="질문 유형"
-            description={questionMode === "general"
-              ? "일상 대화 · 실시간 질문은 자동으로 웹 검색"
-              : "모든 질문에 Google 웹 검색 사용"}
+            description={questionMode === "gemini35"
+              ? "최신 AI · 일반 대화와 게임 질문 · 웹 검색 없음"
+              : questionMode === "gemini25"
+                ? "Gemini 2.5 + Google 실시간 검색"
+                : "Gemini API 없이 Google 검색 페이지 열기"}
             rgOptions={[
-              { data: "general", label: "일반 대화 (자동)" },
-              { data: "web", label: "항상 웹 검색" },
+              { data: "gemini35", label: "3.5 Flash" },
+              { data: "gemini25", label: "2.5 Flash" },
+              { data: "google", label: "Google 검색" },
             ]}
             selectedOption={questionMode}
             onChange={(option) => {
@@ -332,13 +340,17 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
         </PanelSectionRow>
 
         <PanelSectionRow>
-          <div style={{ width: "100%", display: "flex", gap: "8px", alignItems: "flex-end" }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ width: "100%" }}>
+            <div style={{ marginBottom: "6px", fontSize: "14px", fontWeight: 600 }}>
+              {isTranscribing ? "음성을 글로 변환하는 중..." : "메시지 입력"}
+            </div>
+            <div style={{ width: "100%", height: "52px", display: "flex", gap: "8px", alignItems: "stretch" }}>
+              <div style={{ flex: 1, minWidth: 0, height: "52px" }}>
               <TextField
-                label={isTranscribing ? "음성을 글로 변환하는 중..." : "메시지 입력"}
                 value={text}
                 focusOnMount
                 disabled={isVoiceRecording || isTranscribing}
+                style={{ height: "52px" }}
                 onChange={(event) => {
                   const nextText = event.target.value;
                   setText(nextText);
@@ -351,15 +363,16 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
                 }}
                 bShowClearAction
               />
+              </div>
+              <DialogButton
+                aria-label={isVoiceRecording ? "음성 입력 중지" : "음성 입력 시작"}
+                disabled={isWaiting || isSubmitting || isTranscribing}
+                onClick={() => void toggleModalVoice()}
+                style={{ minWidth: "52px", width: "52px", minHeight: "52px", height: "52px", padding: 0, margin: 0 }}
+              >
+                {isVoiceRecording ? <FaStop color="#ff6b6b" /> : <FaMicrophone />}
+              </DialogButton>
             </div>
-            <DialogButton
-              aria-label={isVoiceRecording ? "음성 입력 중지" : "음성 입력 시작"}
-              disabled={isWaiting || isSubmitting || isTranscribing}
-              onClick={() => void toggleModalVoice()}
-              style={{ minWidth: "52px", width: "52px", height: "44px", padding: 0 }}
-            >
-              {isVoiceRecording ? <FaStop color="#ff6b6b" /> : <FaMicrophone />}
-            </DialogButton>
           </div>
         </PanelSectionRow>
 
@@ -745,6 +758,11 @@ function Content() {
                           공략 영상 {index + 1} 재생
                         </ButtonItem>
                       ))}
+                      {extractGoogleSearchUrls(message.text).map((url) => (
+                        <ButtonItem key={url} layout="below" onClick={() => openExternalUrl(url)}>
+                          Google 검색 결과 열기
+                        </ButtonItem>
+                      ))}
                     </div>
                   ) : (
                     <div style={{ fontSize: MESSAGE_FONT_SIZE }}>{message.text}</div>
@@ -820,7 +838,7 @@ function Content() {
 
         <PanelSectionRow>
           <div style={{ width: "100%", opacity: 0.45, fontSize: "9px", textAlign: "right" }}>
-            Decky AI v0.1.2
+            Decky AI v0.1.3
           </div>
         </PanelSectionRow>
       </PanelSection>
