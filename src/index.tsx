@@ -269,11 +269,13 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
         const result = await onVoiceStart();
         if (!result.ok) {
           toaster.toast({ title: "음성 입력 실패", body: result.message, critical: true });
-          appendMessage("backend", `음성 입력 실패: ${result.message}`);
           return;
         }
         setIsVoiceRecording(true);
-        toaster.toast({ title: "음성 입력", body: "말씀하세요. 다시 누르면 글로 변환합니다." });
+        toaster.toast({
+          title: "음성 타이핑 시작",
+          body: "말씀한 뒤 마이크를 다시 누르면 입력란에 글로만 추가됩니다. 자동 전송하지 않습니다.",
+        });
         return;
       }
 
@@ -282,17 +284,21 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
       const result = await onVoiceStop();
       if (!result.ok) {
         toaster.toast({ title: "음성 입력 실패", body: result.message, critical: true });
-        appendMessage("backend", `음성 입력 실패: ${result.message}`);
         return;
       }
       const transcript = result.text.trim();
       if (transcript) {
-        setText(transcript);
-        onDraftChange(transcript);
+        const existing = text.trim();
+        const nextText = existing ? `${existing} ${transcript}` : transcript;
+        setText(nextText);
+        onDraftChange(nextText);
+        toaster.toast({
+          title: "음성 타이핑 완료",
+          body: "입력란에 텍스트를 추가했습니다. 내용을 확인한 뒤 질문 보내기를 눌러 주세요.",
+        });
       }
     } catch (error) {
       setIsVoiceRecording(false);
-      appendMessage("backend", `음성 입력 실패: ${String(error)}`);
       toaster.toast({ title: "음성 입력 실패", body: String(error) });
     } finally {
       setIsTranscribing(false);
@@ -378,13 +384,16 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
               />
               </div>
               <DialogButton
-                aria-label={isVoiceRecording ? "음성 입력 중지" : "음성 입력 시작"}
+                aria-label={isVoiceRecording ? "음성 타이핑 종료 후 텍스트로 변환" : "음성으로 텍스트 입력"}
                 disabled={isWaiting || isSubmitting || isTranscribing}
                 onClick={() => void toggleModalVoice()}
                 style={{ minWidth: "52px", width: "52px", minHeight: "52px", height: "52px", padding: 0, margin: 0 }}
               >
                 {isVoiceRecording ? <FaStop color="#ff6b6b" /> : <FaMicrophone />}
               </DialogButton>
+            </div>
+            <div style={{ marginTop: "6px", opacity: 0.68, fontSize: "10px" }}>
+              마이크는 음성을 텍스트로만 입력합니다. 자동으로 질문을 보내거나 검색하지 않습니다.
             </div>
           </div>
         </PanelSectionRow>
@@ -674,7 +683,7 @@ function Content() {
         strTitle: "AI와 대화하기",
         bNeverPopOut: true,
         popupWidth: 720,
-        popupHeight: 340,
+        popupHeight: 380,
       }
     );
   };
@@ -852,7 +861,7 @@ function Content() {
 
         <PanelSectionRow>
           <div style={{ width: "100%", opacity: 0.45, fontSize: "9px", textAlign: "right" }}>
-            Decky AI v0.1.4
+            Decky AI v0.1.5
           </div>
         </PanelSectionRow>
       </PanelSection>

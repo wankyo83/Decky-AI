@@ -1,6 +1,6 @@
 {
   "name": "decky-ai",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A lifecycle-safe Decky plugin for AI game help",
   "type": "module",
   "scripts": {
