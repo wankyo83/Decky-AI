@@ -29,8 +29,10 @@ const getChatHistory = callable<[], HistoryEntry[]>("get_chat_history");
 const clearChatHistory = callable<[], void>("clear_chat_history");
 const openPanel = callable<[session_id: string], void>("open_panel");
 const closePanel = callable<[session_id: string], void>("close_panel");
-const startVoiceRecording = callable<[session_id: string], void>("start_voice_recording");
-const stopVoiceRecording = callable<[session_id: string, game_name: string], string>("stop_voice_recording");
+type VoiceStartResult = { ok: boolean; message: string };
+type VoiceStopResult = { ok: boolean; text: string; message: string };
+const startVoiceRecording = callable<[session_id: string], VoiceStartResult>("start_voice_recording");
+const stopVoiceRecording = callable<[session_id: string, game_name: string], VoiceStopResult>("stop_voice_recording");
 const cancelVoiceRecording = callable<[session_id: string], void>("cancel_voice_recording");
 const analyzeGameScreen = callable<[text: string, game_name: string, puzzle_mode: boolean, session_id: string], BackendResponse>("analyze_game_screen");
 type YouTubeChapter = { seconds: number; timestamp: string; title: string; generated?: boolean };
@@ -236,8 +238,8 @@ type ComposeMessageModalProps = {
   onDraftChange: (text: string) => void;
   onModeChange: (mode: QuestionMode) => void;
   onSend: (text: string, mode: QuestionMode) => Promise<void>;
-  onVoiceStart: () => Promise<void>;
-  onVoiceStop: () => Promise<string>;
+  onVoiceStart: () => Promise<VoiceStartResult>;
+  onVoiceStop: () => Promise<VoiceStopResult>;
   onVoiceCancel: () => Promise<void>;
   onRequestClose: () => void;
   currentGameName?: string;
@@ -264,7 +266,12 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
   const toggleModalVoice = async () => {
     try {
       if (!isVoiceRecording) {
-        await onVoiceStart();
+        const result = await onVoiceStart();
+        if (!result.ok) {
+          toaster.toast({ title: "음성 입력 실패", body: result.message, critical: true });
+          appendMessage("backend", `음성 입력 실패: ${result.message}`);
+          return;
+        }
         setIsVoiceRecording(true);
         toaster.toast({ title: "음성 입력", body: "말씀하세요. 다시 누르면 글로 변환합니다." });
         return;
@@ -272,7 +279,13 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
 
       setIsVoiceRecording(false);
       setIsTranscribing(true);
-      const transcript = (await onVoiceStop()).trim();
+      const result = await onVoiceStop();
+      if (!result.ok) {
+        toaster.toast({ title: "음성 입력 실패", body: result.message, critical: true });
+        appendMessage("backend", `음성 입력 실패: ${result.message}`);
+        return;
+      }
+      const transcript = result.text.trim();
       if (transcript) {
         setText(transcript);
         onDraftChange(transcript);
@@ -580,8 +593,9 @@ function Content() {
           if (pendingRequests > 0) {
             throw new Error("다른 AI 요청이 진행 중입니다.");
           }
-          await startVoiceRecording(panelSessionId);
-          setIsRecording(true);
+          const result = await startVoiceRecording(panelSessionId);
+          setIsRecording(result.ok);
+          return result;
         }}
         onVoiceStop={async () => {
           try {
@@ -838,7 +852,7 @@ function Content() {
 
         <PanelSectionRow>
           <div style={{ width: "100%", opacity: 0.45, fontSize: "9px", textAlign: "right" }}>
-            Decky AI v0.1.3
+            Decky AI v0.1.4
           </div>
         </PanelSectionRow>
       </PanelSection>

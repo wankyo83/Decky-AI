@@ -65,6 +65,7 @@ class Plugin:
         self._media_process: Optional[asyncio.subprocess.Process] = None
         self._recording_path: Optional[Path] = None
         self._recording_timer: Optional[asyncio.Task] = None
+        self._recording_backend: Optional[str] = None
         self._chapter_task: Optional[asyncio.Task] = None
 
     def _history_path(self) -> Path:
@@ -588,13 +589,33 @@ class Plugin:
         await self._cancel_recording()
         decky.logger.debug(f"[lifecycle] Panel closed: {session_id}")
 
-    async def start_voice_recording(self, session_id: str) -> None:
+    def _resolve_media_command(self, name: str) -> Optional[str]:
+        """Find SteamOS media tools even when Decky's service PATH is minimal."""
+        search_path = os.pathsep.join(filter(None, [
+            os.environ.get("PATH", ""),
+            "/usr/bin", "/bin", "/usr/local/bin", "/app/bin",
+        ]))
+        return shutil.which(name, path=search_path)
+
+    async def start_voice_recording(self, session_id: str) -> Dict[str, object]:
+        """Decky callable wrapper that never collapses diagnostics to Python Exception."""
+        try:
+            await self._start_voice_recording_impl(session_id)
+            return {"ok": True, "message": "음성 녹음을 시작했습니다."}
+        except Exception as error:
+            await self._cancel_recording()
+            detail = re.sub(r"\s+", " ", str(error)).strip()
+            decky.logger.error(f"[voice] Could not start recording: {detail}")
+            return {
+                "ok": False,
+                "message": detail or "SteamOS 마이크 녹음을 시작하지 못했습니다.",
+            }
+
+    async def _start_voice_recording_impl(self, session_id: str) -> None:
         # A Decky modal can briefly hide QAM; an explicit user action reopens the session.
         self._panel_session = session_id
         if self._request_task and not self._request_task.done():
             raise RuntimeError("An AI request is already running")
-        if not shutil.which("pw-record"):
-            raise RuntimeError("pw-record is not available on this SteamOS installation")
 
         await self._cancel_recording()
         runtime_dir = Path(decky.DECKY_PLUGIN_RUNTIME_DIR)
@@ -603,13 +624,44 @@ class Plugin:
         os.close(fd)
         self._recording_path = Path(raw_path)
         voice_env = self._screen_capture_environment()
+
+        pw_record = self._resolve_media_command("pw-record")
+        pw_cat = self._resolve_media_command("pw-cat")
+        parec = self._resolve_media_command("parec")
+        gst_launch = self._resolve_media_command("gst-launch-1.0")
+        if pw_record:
+            command = [
+                pw_record, "--rate=48000", "--channels=1", "--format=s16",
+                "--channel-map=mono", raw_path,
+            ]
+            self._recording_backend = "pw-record"
+        elif pw_cat:
+            command = [
+                pw_cat, "--record", "--rate=48000", "--channels=1", "--format=s16",
+                "--channel-map=mono", raw_path,
+            ]
+            self._recording_backend = "pw-cat"
+        elif parec:
+            command = [
+                parec, "--file-format=wav", "--rate=48000", "--channels=1",
+                "--format=s16le", raw_path,
+            ]
+            self._recording_backend = "parec"
+        elif gst_launch:
+            command = [
+                gst_launch, "-q", "-e", "pulsesrc", "!", "audioconvert", "!",
+                "audioresample", "!", "audio/x-raw,rate=48000,channels=1", "!",
+                "wavenc", "!", "filesink", f"location={raw_path}",
+            ]
+            self._recording_backend = "GStreamer"
+        else:
+            raise RuntimeError(
+                "사용 가능한 녹음 도구가 없습니다. pw-record, pw-cat, parec 또는 "
+                "gst-launch-1.0이 필요합니다."
+            )
+
         self._media_process = await asyncio.create_subprocess_exec(
-            "pw-record",
-            "--rate=48000",
-            "--channels=1",
-            "--format=s16",
-            "--channel-map=mono",
-            raw_path,
+            *command,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
             env=voice_env,
@@ -628,12 +680,39 @@ class Plugin:
             self._recording_path = None
             raise RuntimeError(
                 "SteamOS 마이크에 연결하지 못했습니다. "
-                f"진단: {detail or f'pw-record 종료 코드 {process.returncode}'}"
+                f"진단({self._recording_backend}): "
+                f"{detail or f'종료 코드 {process.returncode}'}"
             )
         self._recording_timer = asyncio.create_task(self._recording_time_limit())
         decky.logger.info("[voice] Recording started")
 
-    async def stop_voice_recording(self, session_id: str, game_name: str = "") -> str:
+    async def stop_voice_recording(
+        self, session_id: str, game_name: str = ""
+    ) -> Dict[str, object]:
+        """Return structured transcription errors instead of a bridge exception."""
+        try:
+            transcript = await self._stop_voice_recording_impl(session_id, game_name)
+            return {"ok": True, "text": transcript, "message": ""}
+        except ModelApiError as error:
+            message = (
+                "429 오류: 분당/일일 무료 사용량 소진"
+                if error.status_code == 429
+                else f"음성 변환 Gemini API 오류: {error.status_code}"
+            )
+            decky.logger.warning(f"[voice] Transcription API error: {error.status_code}")
+            return {"ok": False, "text": "", "message": message}
+        except Exception as error:
+            detail = re.sub(r"\s+", " ", str(error)).strip()
+            decky.logger.error(f"[voice] Transcription failed: {detail}")
+            return {
+                "ok": False,
+                "text": "",
+                "message": detail or "음성을 글로 변환하지 못했습니다.",
+            }
+
+    async def _stop_voice_recording_impl(
+        self, session_id: str, game_name: str = ""
+    ) -> str:
         if self._panel_session != session_id:
             await self._cancel_recording()
             return ""
@@ -755,6 +834,10 @@ class Plugin:
             "XDG_SESSION_TYPE": "wayland",
             "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_dir}/bus",
             "PIPEWIRE_REMOTE": "pipewire-0",
+            "PULSE_SERVER": f"unix:{runtime_dir}/pulse/native",
+            "PATH": os.pathsep.join(filter(None, [
+                env.get("PATH", ""), "/usr/bin", "/bin", "/usr/local/bin", "/app/bin",
+            ])),
         })
         return env
 
