@@ -8,6 +8,8 @@ import signal
 import tempfile
 import re
 import html
+import hashlib
+import tarfile
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,6 +59,13 @@ from chat_common import (
 class Plugin:
     HISTORY_FILE = "chat_history.json"
     SECRETS_FILE = "secrets.env"
+    WHISPER_VERSION = "v1.9.1"
+    WHISPER_MODEL_NAME = "ggml-small-q5_1.bin"
+    WHISPER_DOWNLOAD_MB = 200
+    WHISPER_BINARY_URL = "https://github.com/ggml-org/whisper.cpp/releases/download/v1.9.1/whisper-bin-ubuntu-x64.tar.gz"
+    WHISPER_BINARY_SHA256 = "f3bf3b4369a99b54665b0f19b88483b30de27f25963b0414235dea03198515c5"
+    WHISPER_MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/3e251d613ae82c33b1dcca9f0406c697c3f9d083/ggml-small-q5_1.bin?download=true"
+    WHISPER_MODEL_SHA256 = "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
 
     def __init__(self) -> None:
         self._panel_session: Optional[str] = None
@@ -67,6 +76,11 @@ class Plugin:
         self._recording_timer: Optional[asyncio.Task] = None
         self._recording_backend: Optional[str] = None
         self._chapter_task: Optional[asyncio.Task] = None
+        self._whisper_prepare_lock = asyncio.Lock()
+        self._whisper_status: Dict[str, object] = {
+            "phase": "idle", "downloaded_bytes": 0, "total_bytes": 0,
+            "message": "", "ready": False,
+        }
 
     def _history_path(self) -> Path:
         return Path(decky.DECKY_PLUGIN_RUNTIME_DIR) / self.HISTORY_FILE
@@ -597,11 +611,213 @@ class Plugin:
         ]))
         return shutil.which(name, path=search_path)
 
+    def _whisper_dir(self) -> Path:
+        return Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "local-whisper" / self.WHISPER_VERSION
+
+    def _local_whisper_paths(self) -> Tuple[Optional[Path], Path]:
+        whisper_dir = self._whisper_dir()
+        candidates = list(whisper_dir.rglob("whisper-cli")) if whisper_dir.exists() else []
+        return (candidates[0] if candidates else None, whisper_dir / self.WHISPER_MODEL_NAME)
+
+    def _local_whisper_ready(self) -> bool:
+        cli_path, model_path = self._local_whisper_paths()
+        return bool(cli_path and cli_path.is_file() and model_path.is_file())
+
+    async def get_local_whisper_status(self) -> Dict[str, object]:
+        status = dict(self._whisper_status)
+        ready = self._local_whisper_ready()
+        status["ready"] = ready
+        status["download_size_mb"] = self.WHISPER_DOWNLOAD_MB
+        if ready and status.get("phase") == "idle":
+            status["phase"] = "ready"
+            status["message"] = "로컬 Whisper 준비 완료"
+        return status
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    async def _download_whisper_file(
+        self,
+        url: str,
+        destination: Path,
+        expected_sha256: str,
+        phase: str,
+        label: str,
+    ) -> None:
+        temporary = destination.with_name(destination.name + ".download")
+        temporary.unlink(missing_ok=True)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        self._whisper_status.update({
+            "phase": phase,
+            "downloaded_bytes": 0,
+            "total_bytes": 0,
+            "message": f"{label} 다운로드 중",
+            "ready": False,
+        })
+        try:
+            timeout = httpx.Timeout(600.0, connect=30.0)
+            async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    total = int(response.headers.get("content-length", "0") or 0)
+                    self._whisper_status["total_bytes"] = total
+                    downloaded = 0
+                    with temporary.open("wb") as output:
+                        async for chunk in response.aiter_bytes(1024 * 1024):
+                            output.write(chunk)
+                            downloaded += len(chunk)
+                            self._whisper_status["downloaded_bytes"] = downloaded
+            actual_sha256 = await asyncio.to_thread(self._sha256, temporary)
+            if actual_sha256.lower() != expected_sha256.lower():
+                raise RuntimeError("로컬 Whisper 파일 무결성 검사에 실패했습니다. 다시 시도해 주세요.")
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _extract_whisper_archive(archive: Path, destination: Path) -> None:
+        destination.mkdir(parents=True, exist_ok=True)
+        root = destination.resolve()
+        with tarfile.open(archive, "r:gz") as bundle:
+            # Write regular files first, then recreate only relative links that stay
+            # inside this versioned cache directory.
+            for member in bundle.getmembers():
+                if not member.isfile():
+                    continue
+                target = (destination / member.name).resolve()
+                if root not in target.parents and target != root:
+                    raise RuntimeError("Whisper 압축 파일에 안전하지 않은 경로가 있습니다.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = bundle.extractfile(member)
+                if source is None:
+                    continue
+                with source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+            for member in bundle.getmembers():
+                if not member.issym():
+                    continue
+                target = (destination / member.name).resolve()
+                link_target = (target.parent / member.linkname).resolve()
+                if (
+                    (root not in target.parents and target != root)
+                    or (root not in link_target.parents and link_target != root)
+                ):
+                    raise RuntimeError("Whisper 압축 파일에 안전하지 않은 링크가 있습니다.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.unlink(missing_ok=True)
+                target.symlink_to(member.linkname)
+
+    async def _prepare_local_whisper(self) -> Tuple[Path, Path]:
+        async with self._whisper_prepare_lock:
+            whisper_dir = self._whisper_dir()
+            cli_path, model_path = self._local_whisper_paths()
+            if cli_path is None or not cli_path.is_file():
+                archive = whisper_dir / "whisper-bin-ubuntu-x64.tar.gz"
+                await self._download_whisper_file(
+                    self.WHISPER_BINARY_URL, archive, self.WHISPER_BINARY_SHA256,
+                    "downloading_runtime", "Whisper 실행 파일(약 9MB)",
+                )
+                self._whisper_status.update({
+                    "phase": "extracting_runtime", "message": "Whisper 실행 파일 설치 중",
+                })
+                await asyncio.to_thread(self._extract_whisper_archive, archive, whisper_dir)
+                archive.unlink(missing_ok=True)
+                cli_path, model_path = self._local_whisper_paths()
+            if cli_path is None or not cli_path.is_file():
+                raise RuntimeError("로컬 Whisper 실행 파일을 준비하지 못했습니다.")
+            cli_path.chmod(cli_path.stat().st_mode | 0o111)
+            if not model_path.is_file():
+                await self._download_whisper_file(
+                    self.WHISPER_MODEL_URL, model_path, self.WHISPER_MODEL_SHA256,
+                    "downloading_model", "한국어 음성 모델(약 190MB)",
+                )
+            self._whisper_status.update({
+                "phase": "ready", "downloaded_bytes": 0, "total_bytes": 0,
+                "message": "로컬 Whisper 준비 완료", "ready": True,
+            })
+            return cli_path, model_path
+
+    async def _transcribe_with_local_whisper(self, audio_path: Path, game_name: str) -> str:
+        cli_path, model_path = await self._prepare_local_whisper()
+        self._whisper_status.update({
+            "phase": "transcribing", "message": "로컬 Whisper로 음성을 글로 변환 중",
+            "downloaded_bytes": 0, "total_bytes": 0, "ready": True,
+        })
+        output_prefix = audio_path.with_name(audio_path.stem + "-transcript")
+        output_text = Path(str(output_prefix) + ".txt")
+        output_text.unlink(missing_ok=True)
+        threads = max(2, min(4, os.cpu_count() or 4))
+        prompt = (
+            "한국어 게임 질문 받아쓰기. 스킬트리, 캐릭터, 퀘스트, 공략, 퍼즐, 보스. "
+            f"현재 게임: {game_name.strip() or '알 수 없음'}"
+        )
+        command = [
+            str(cli_path), "--model", str(model_path), "--file", str(audio_path),
+            "--language", "ko", "--threads", str(threads), "--no-gpu",
+            "--no-timestamps", "--output-txt", "--output-file", str(output_prefix),
+            "--prompt", prompt,
+        ]
+        whisper_env = self._screen_capture_environment()
+        library_dirs = {str(cli_path.parent)}
+        library_dirs.update(str(path.parent) for path in self._whisper_dir().rglob("*.so*"))
+        existing = whisper_env.get("LD_LIBRARY_PATH", "")
+        whisper_env["LD_LIBRARY_PATH"] = os.pathsep.join([*sorted(library_dirs), existing]).rstrip(os.pathsep)
+        process: Optional[asyncio.subprocess.Process] = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=whisper_env,
+            )
+            self._media_process = process
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120.0)
+            if process.returncode != 0:
+                detail = re.sub(r"\s+", " ", stderr.decode("utf-8", errors="ignore")).strip()[-300:]
+                raise RuntimeError(
+                    "로컬 Whisper 음성 변환에 실패했습니다. "
+                    f"진단: {detail or f'종료 코드 {process.returncode}'}"
+                )
+            transcript = (
+                output_text.read_text(encoding="utf-8", errors="ignore")
+                if output_text.is_file() else stdout.decode("utf-8", errors="ignore")
+            )
+            transcript = re.sub(r"\[(?:BLANK_AUDIO|음악|박수|침묵)\]", "", transcript, flags=re.IGNORECASE)
+            transcript = re.sub(r"\s+", " ", transcript).strip()
+            if not transcript:
+                raise RuntimeError("말소리를 인식하지 못했습니다. 마이크 가까이에서 다시 말해 주세요.")
+            return transcript
+        except asyncio.TimeoutError as error:
+            if process and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise RuntimeError("로컬 Whisper 변환 시간이 초과되었습니다. 짧게 다시 말해 주세요.") from error
+        except asyncio.CancelledError:
+            if process and process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
+        finally:
+            if self._media_process is process:
+                self._media_process = None
+            output_text.unlink(missing_ok=True)
+            if self._local_whisper_ready():
+                self._whisper_status.update({"phase": "ready", "message": "로컬 Whisper 준비 완료", "ready": True})
+
     async def start_voice_recording(self, session_id: str) -> Dict[str, object]:
         """Decky callable wrapper that never collapses diagnostics to Python Exception."""
         try:
             await self._start_voice_recording_impl(session_id)
-            return {"ok": True, "message": "음성 녹음을 시작했습니다."}
+            ready = self._local_whisper_ready()
+            return {
+                "ok": True,
+                "message": "음성 녹음을 시작했습니다.",
+                "whisper_ready": ready,
+                "download_size_mb": self.WHISPER_DOWNLOAD_MB,
+            }
         except Exception as error:
             await self._cancel_recording()
             detail = re.sub(r"\s+", " ", str(error)).strip()
@@ -689,18 +905,10 @@ class Plugin:
     async def stop_voice_recording(
         self, session_id: str, game_name: str = ""
     ) -> Dict[str, object]:
-        """Return structured transcription errors instead of a bridge exception."""
+        """Transcribe locally and return bridge-safe diagnostics."""
         try:
             transcript = await self._stop_voice_recording_impl(session_id, game_name)
             return {"ok": True, "text": transcript, "message": ""}
-        except ModelApiError as error:
-            message = (
-                "429 오류: 분당/일일 무료 사용량 소진"
-                if error.status_code == 429
-                else f"음성 변환 Gemini API 오류: {error.status_code}"
-            )
-            decky.logger.warning(f"[voice] Transcription API error: {error.status_code}")
-            return {"ok": False, "text": "", "message": message}
         except Exception as error:
             detail = re.sub(r"\s+", " ", str(error)).strip()
             decky.logger.error(f"[voice] Transcription failed: {detail}")
@@ -728,8 +936,7 @@ class Plugin:
         await self._stop_media_process()
         self._recording_path = None
         try:
-            audio = path.read_bytes()
-            if len(audio) < 1024:
+            if path.stat().st_size < 1024:
                 detail = ""
                 if recording_process and recording_process.stderr:
                     error = await recording_process.stderr.read()
@@ -740,32 +947,7 @@ class Plugin:
                     "마이크 음성이 녹음되지 않았습니다. "
                     f"진단: {detail or '녹음 파일이 비어 있음'}"
                 )
-            transcription_prompt = f"""
-            Transcribe this short voice input for a gaming assistant.
-            Current game: {game_name.strip() or 'Unknown game'}
-
-            Requirements:
-            - The speaker will usually speak Korean, possibly mixed with English game names.
-            - Use the current game as context to resolve similar-sounding words.
-            - Prefer common gaming terms when supported by the audio, such as 스킬 트리,
-              빌드, 퀘스트, 장비, 특성, 캐릭터, 보스, 공략, 레벨, 무기, 방어구.
-            - For example, do not turn clearly spoken '스킬 트리 추천해줘' into an
-              unrelated phrase such as '숲 캐릭터 추천해줘'.
-            - Preserve the user's intended question; do not answer it.
-            - Return only one cleaned transcription sentence with no quotation marks,
-              explanation, label, or markdown.
-            """
-            task = asyncio.create_task(call_model(
-                transcription_prompt,
-                model=MODEL,
-                media_bytes=audio,
-                media_mime_type="audio/wav",
-                system_instruction=(
-                    "You are a highly accurate multilingual speech-to-text engine for "
-                    "video-game questions. Output only the transcription. Use acoustic "
-                    "evidence first and game context only to resolve ambiguity."
-                ),
-            ))
+            task = asyncio.create_task(self._transcribe_with_local_whisper(path, game_name))
             self._request_task = task
             self._request_kind = "voice"
             transcript = (await task or "").strip()

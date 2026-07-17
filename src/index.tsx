@@ -29,11 +29,20 @@ const getChatHistory = callable<[], HistoryEntry[]>("get_chat_history");
 const clearChatHistory = callable<[], void>("clear_chat_history");
 const openPanel = callable<[session_id: string], void>("open_panel");
 const closePanel = callable<[session_id: string], void>("close_panel");
-type VoiceStartResult = { ok: boolean; message: string };
+type VoiceStartResult = { ok: boolean; message: string; whisper_ready?: boolean; download_size_mb?: number };
 type VoiceStopResult = { ok: boolean; text: string; message: string };
+type LocalWhisperStatus = {
+  phase: string;
+  downloaded_bytes: number;
+  total_bytes: number;
+  message: string;
+  ready: boolean;
+  download_size_mb: number;
+};
 const startVoiceRecording = callable<[session_id: string], VoiceStartResult>("start_voice_recording");
 const stopVoiceRecording = callable<[session_id: string, game_name: string], VoiceStopResult>("stop_voice_recording");
 const cancelVoiceRecording = callable<[session_id: string], void>("cancel_voice_recording");
+const getLocalWhisperStatus = callable<[], LocalWhisperStatus>("get_local_whisper_status");
 const analyzeGameScreen = callable<[text: string, game_name: string, puzzle_mode: boolean, session_id: string], BackendResponse>("analyze_game_screen");
 type YouTubeChapter = { seconds: number; timestamp: string; title: string; generated?: boolean };
 const getYouTubeChapters = callable<[video_id: string], YouTubeChapter[]>("get_youtube_chapters");
@@ -254,6 +263,7 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isVoiceRecording, setIsVoiceRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [whisperProgress, setWhisperProgress] = useState("");
   const isSendDisabled = isWaiting || isSubmitting || isVoiceRecording || isTranscribing;
 
   const closeComposer = () => {
@@ -272,6 +282,14 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
           return;
         }
         setIsVoiceRecording(true);
+        if (result.whisper_ready === false) {
+          const size = result.download_size_mb ?? 200;
+          setWhisperProgress(`최초 사용 준비 필요 · 다운로드 약 ${size}MB`);
+          toaster.toast({
+            title: "로컬 Whisper 최초 준비",
+            body: `녹음을 마치면 약 ${size}MB를 한 번만 다운로드합니다. 진행 용량이 화면에 표시됩니다.`,
+          });
+        }
         toaster.toast({
           title: "음성 타이핑 시작",
           body: "말씀한 뒤 마이크를 다시 누르면 입력란에 글로만 추가됩니다. 자동 전송하지 않습니다.",
@@ -281,7 +299,33 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
 
       setIsVoiceRecording(false);
       setIsTranscribing(true);
-      const result = await onVoiceStop();
+      setWhisperProgress("로컬 Whisper 상태 확인 중...");
+      const updateProgress = async () => {
+        try {
+          const status = await getLocalWhisperStatus();
+          const downloadedMb = status.downloaded_bytes / 1024 / 1024;
+          const totalMb = status.total_bytes / 1024 / 1024;
+          if (status.phase.startsWith("downloading")) {
+            setWhisperProgress(
+              totalMb > 0
+                ? `${status.message} · ${downloadedMb.toFixed(1)}MB / ${totalMb.toFixed(1)}MB · 전체 약 ${status.download_size_mb}MB`
+                : `${status.message} · ${downloadedMb.toFixed(1)}MB · 전체 약 ${status.download_size_mb}MB`
+            );
+          } else if (status.message) {
+            setWhisperProgress(status.message);
+          }
+        } catch {
+          // The transcription result still carries the actionable error.
+        }
+      };
+      await updateProgress();
+      const progressTimer = window.setInterval(() => void updateProgress(), 500);
+      let result: VoiceStopResult;
+      try {
+        result = await onVoiceStop();
+      } finally {
+        window.clearInterval(progressTimer);
+      }
       if (!result.ok) {
         toaster.toast({ title: "음성 입력 실패", body: result.message, critical: true });
         return;
@@ -297,6 +341,7 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
           body: "입력란에 텍스트를 추가했습니다. 내용을 확인한 뒤 질문 보내기를 눌러 주세요.",
         });
       }
+      setWhisperProgress("");
     } catch (error) {
       setIsVoiceRecording(false);
       toaster.toast({ title: "음성 입력 실패", body: String(error) });
@@ -361,7 +406,7 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
         <PanelSectionRow>
           <div style={{ width: "100%" }}>
             <div style={{ marginBottom: "6px", fontSize: "14px", fontWeight: 600 }}>
-              {isTranscribing ? "음성을 글로 변환하는 중..." : "메시지 입력"}
+              {isTranscribing ? (whisperProgress || "로컬 Whisper로 글로 변환하는 중...") : "메시지 입력"}
             </div>
             <div style={{ width: "100%", height: "52px", display: "flex", gap: "8px", alignItems: "stretch" }}>
               <div style={{ flex: 1, minWidth: 0, height: "52px" }}>
@@ -393,7 +438,7 @@ function ComposeMessageModal({ initialText, initialMode, onDraftChange, onModeCh
               </DialogButton>
             </div>
             <div style={{ marginTop: "6px", opacity: 0.68, fontSize: "10px" }}>
-              마이크는 음성을 텍스트로만 입력합니다. 자동으로 질문을 보내거나 검색하지 않습니다.
+              마이크는 로컬 Whisper로 텍스트만 입력합니다. 최초 1회 약 200MB를 준비하며 자동으로 질문을 보내거나 검색하지 않습니다.
             </div>
           </div>
         </PanelSectionRow>
@@ -861,7 +906,7 @@ function Content() {
 
         <PanelSectionRow>
           <div style={{ width: "100%", opacity: 0.45, fontSize: "9px", textAlign: "right" }}>
-            Decky AI v0.1.5
+            Decky AI v0.1.6
           </div>
         </PanelSectionRow>
       </PanelSection>
