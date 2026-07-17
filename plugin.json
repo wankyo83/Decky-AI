@@ -1,11 +1,11 @@
 {
-  "name": "Deck Muse",
-  "author": "The Glover",
-  "flags": ["debug", "_root"],
+  "name": "Decky AI",
+  "author": "Decky AI contributors",
+  "flags": ["debug"],
   "api_version": 1,
   "publish": {
-    "tags": ["template", "root"],
-    "description": "AI game help.",
-    "image": "https://opengraph.githubassets.com/1/SteamDeckHomebrew/PluginLoader"
+    "tags": ["ai", "games", "utility"],
+    "description": "Gemini game help, voice input, screen analysis, and YouTube walkthrough search.",
+    "image": "https://opengraph.githubassets.com/1/wankyo83/Decky-AI"
   }
 }

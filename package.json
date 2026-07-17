@@ -1,7 +1,7 @@
 {
-  "name": "deck-muse",
-  "version": "0.0.8",
-  "description": "A Decky plugin that allows you to get game help using Gemma4 and google searches",
+  "name": "decky-ai",
+  "version": "0.1.2",
+  "description": "A lifecycle-safe Decky plugin for AI game help",
   "type": "module",
   "scripts": {
     "build": "rollup -c",
@@ -15,21 +15,22 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SteamDeckHomebrew/decky-plugin-template.git"
+    "url": "git+https://github.com/wankyo83/Decky-AI.git"
   },
   "keywords": [
     "decky",
     "plugin",
-    "plugin-template",
+    "gemini",
+    "gaming-assistant",
     "steam-deck",
     "deck"
   ],
-  "author": "gloverthe",
+  "author": "Decky AI contributors",
   "license": "BSD-3-Clause",
   "bugs": {
-    "url": "https://github.com/SteamDeckHomebrew/decky-plugin-template/issues"
+    "url": "https://github.com/wankyo83/Decky-AI/issues"
   },
-  "homepage": "https://github.com/SteamDeckHomebrew/decky-plugin-template#readme",
+  "homepage": "https://github.com/wankyo83/Decky-AI#readme",
   "devDependencies": {
     "@decky/rollup": "^1.0.2",
     "@decky/ui": "^4.11.6",

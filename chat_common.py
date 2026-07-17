@@ -2,7 +2,7 @@ import os
 import re
 import sys
 import importlib
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -61,10 +61,17 @@ from google import genai
 from google.genai import types
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", None)
-MODEL = os.getenv("GOOGLE_MODEL", "gemma-4-26b-a4b-it")
+MODEL = os.getenv("GOOGLE_MODEL", "gemini-3.5-flash")
+SEARCH_MODEL = os.getenv("GOOGLE_SEARCH_MODEL", "gemini-2.5-flash")
 MODEL_TIMEOUT_SECONDS = int(os.getenv("MODEL_TIMEOUT_SECONDS", "60"))
 MODEL_TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.1"))
 NUM_HISTORY_MESSAGES = int(os.getenv("NUM_HISTORY_MESSAGES", "10"))
+ENABLE_GOOGLE_SEARCH = os.getenv("ENABLE_GOOGLE_SEARCH", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 
 # Guardrail: fail fast if google.genai resolves outside vendored py_modules.
@@ -88,22 +95,6 @@ def build_prompt(history_text: str) -> str:
         "DO NOT use internal reasoning or thinking process. Give the answer immediately once the research is complete.\n\n"
         f"Chat history:\n{history_text}\n\nAssistant:"
     )
-
-
-def _run_with_timeout(callable_fn, timeout_seconds: int):
-    """Run a blocking function with a timeout, using ThreadPoolExecutor to avoid blocking the event loop."""
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(callable_fn)
-    try:
-        return future.result(timeout=timeout_seconds)
-    except FuturesTimeoutError as error:
-        future.cancel()
-        raise TimeoutError(
-            f"Model request timed out after {timeout_seconds} seconds"
-        ) from error
-    finally:
-        # Do not wait for stuck network calls when timing out.
-        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def serialize_history(
@@ -159,75 +150,122 @@ class ModelApiError(Exception):
         super().__init__(f"Model API error code: {status_code}")
 
 
-def call_model_with_timeout(
+async def call_model(
     prompt: str,
     timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
     temperature: float = MODEL_TEMPERATURE,
     model: str = MODEL,
+    enable_google_search: bool = ENABLE_GOOGLE_SEARCH,
     api_key: str | None = None,
+    media_bytes: bytes | None = None,
+    media_mime_type: str | None = None,
+    system_instruction: str | None = None,
 ) -> Optional[str]:
-    """Call the Gemini model with a timeout and raise on non-200 API status codes."""
+    """Call Gemini asynchronously so a hidden or closed panel can cancel the request."""
     actual_key = api_key or GEMINI_API_KEY or os.environ.get("GEMINI_API_KEY")
     if not actual_key:
         raise ModelConfigError("GEMINI_API_KEY is not set in environment variables")
 
-    client = genai.Client(api_key=actual_key)
-
-    def call_model():
-
-        search_tool = types.Tool(google_search=types.GoogleSearch())
-
-        config = types.GenerateContentConfig(
-            tools=[search_tool],
-            system_instruction="""
-            Provide direct game tips only.
-            If the question is not about computer games, say you can only answer questions about computer games.
-            DO NOT use <|think|> tags or provide internal reasoning.
-            Always use the google search tool to look up information then summarize it in your response.
-            Include a 'Sources' section at the end with URLs for any references used.
-            If a URL is unavailable, acknowledge the original author or publication.
-            """,
-            temperature=temperature,
-        )
-
-        response = client.models.generate_content(
-            model=model, contents=prompt, config=config
-        )
-
-        final_text = response.text or ""
-
-        # Extract web sources from grounding metadata (google search tool output).
-        sources: List[str] = []
-        if response.candidates:
-            candidate = response.candidates[0]
-            metadata = getattr(candidate, "grounding_metadata", None)
-            grounding_chunks = (
-                getattr(metadata, "grounding_chunks", None) if metadata else None
-            )
-
-            if grounding_chunks:
-                for chunk in grounding_chunks:
-                    web = getattr(chunk, "web", None)
-                    if not web:
-                        continue
-
-                    title = getattr(web, "title", None) or "Source"
-                    url = getattr(web, "uri", None)
-                    if url:
-                        sources.append(f"- [{title}]({url})")
-
-        if sources:
-            unique_sources = list(dict.fromkeys(sources))
-            final_text += "\n\n**Sources:**\n" + "\n".join(unique_sources)
-
-        return final_text
+    tools = (
+        [types.Tool(google_search=types.GoogleSearch())]
+        if enable_google_search
+        else None
+    )
+    config_kwargs: Dict[str, object] = {
+        "tools": tools,
+        "system_instruction": system_instruction or """
+        You are Decky AI, a concise and helpful general-purpose assistant that
+        also specializes in video games.
+        Answer in the same language as the user.
+        Use the current game name only when the user's question is related to gaming.
+        For ordinary conversation, answer naturally without forcing a game connection.
+        If the user asks for weather without naming a location, ask which city or region.
+        If a search tool is available, use it for current game facts and strategies.
+        Also use the search tool for current weather, news, prices, exchange rates,
+        schedules, and other time-sensitive facts. If no search tool is available,
+        clearly say when information may be outdated.
+        Do not expose internal reasoning.
+        Include sources when they are available.
+        """,
+    }
+    # Gemini 3.5 uses its own thinking controls; Google recommends omitting the
+    # older sampling knobs during migration.
+    if model != "gemini-3.5-flash":
+        config_kwargs["temperature"] = temperature
+    config = types.GenerateContentConfig(**config_kwargs)
 
     try:
-        return _run_with_timeout(call_model, timeout_seconds)
-    except TimeoutError:
+        contents: object = prompt
+        if media_bytes is not None:
+            if not media_mime_type:
+                raise ModelConfigError("A MIME type is required for media input")
+            contents = [
+                prompt,
+                types.Part.from_bytes(data=media_bytes, mime_type=media_mime_type),
+            ]
+
+        async with genai.Client(api_key=actual_key).aio as client:
+            response = await asyncio.wait_for(
+                client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=config,
+                ),
+                timeout=timeout_seconds,
+            )
+    except asyncio.CancelledError:
+        # Closing the Decky panel cancels the underlying async HTTP request.
         raise
+    except asyncio.TimeoutError as error:
+        raise TimeoutError(
+            f"Model request timed out after {timeout_seconds} seconds"
+        ) from error
     except Exception as error:
         status_code = _extract_api_status_code(error)
         if status_code is not None and status_code != 200:
             raise ModelApiError(status_code, str(error)) from error
         raise
+
+    final_text = response.text or ""
+
+    # Extract web sources from grounding metadata (Google Search tool output).
+    sources: List[str] = []
+    search_was_used = False
+    if response.candidates:
+        candidate = response.candidates[0]
+        metadata = getattr(candidate, "grounding_metadata", None)
+        if metadata:
+            search_was_used = bool(
+                getattr(metadata, "web_search_queries", None)
+                or getattr(metadata, "search_entry_point", None)
+                or getattr(metadata, "grounding_chunks", None)
+            )
+        grounding_chunks = (
+            getattr(metadata, "grounding_chunks", None) if metadata else None
+        )
+
+        if grounding_chunks:
+            for chunk in grounding_chunks:
+                web = getattr(chunk, "web", None)
+                if not web:
+                    continue
+
+                title = getattr(web, "title", None) or "Source"
+                url = getattr(web, "uri", None)
+                if url:
+                    sources.append(f"- [{title}]({url})")
+
+    if enable_google_search and not search_was_used:
+        raise ModelApiError(
+            424,
+            "Gemini returned an answer without using Google Search grounding",
+        )
+
+    if sources:
+        unique_sources = list(dict.fromkeys(sources))
+        final_text += (
+            "\n\n**실제 Google 검색 확인됨**\n\n**출처:**\n"
+            + "\n".join(unique_sources)
+        )
+
+    return final_text

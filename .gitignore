@@ -23,6 +23,9 @@ coverage
 
 # API keys and secrets
 .env
+secrets.env
+Decky_Ai.ini
+Decky_AI.ini
 
 # Dependency directory
 node_modules
